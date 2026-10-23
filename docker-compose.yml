@@ -1,0 +1,73 @@
+name: eagler
+
+services:
+  nginx:
+    build: ./nginx
+    image: eagler-nginx
+    restart: unless-stopped
+    depends_on:
+      - backend
+      - relay
+    ports:
+      - "${HTTP_PORT:-80}:${HTTP_PORT:-80}"
+      - "${HTTPS_PORT:-443}:${HTTPS_PORT:-443}"
+    volumes:
+      - ./rendered/nginx/eagler.conf:/etc/nginx/conf.d/eagler.conf:ro
+      - ./rendered/nginx/security.conf:/etc/nginx/security.conf:ro
+      - ./rendered/nginx/tls.conf:/etc/nginx/tls.conf:ro
+      - ./rendered/acme:/var/www/acme
+      - ./client/versions:/var/www/eagler/versions:ro
+      - ./tls/nginx:/etc/nginx/tls:ro
+    mem_limit: 64m
+
+  backend:
+    build: ./backend
+    image: eagler-backend
+    restart: unless-stopped
+    depends_on:
+      - relay
+    environment:
+      NODE_ENV: production
+      DATA_DIR: /data
+      CLIENT_DIR: /srv/client/versions
+      BACKUP_DIR: /srv/backups
+      RENDER_DIR: /rendered
+      TLS_DIR: /tls
+      PUBLIC_IP: ${PUBLIC_IP:?Set PUBLIC_IP in .env}
+      PRIVATE_IP: ${PRIVATE_IP:-}
+      TURN_USERNAME: ${TURN_USERNAME:-eagler}
+      TURN_PASSWORD: ${TURN_PASSWORD:-}
+      TZ: ${TZ:-UTC}
+    extra_hosts:
+      - "host.docker.internal:host-gateway"
+    volumes:
+      - ./data:/data
+      - ./client/versions:/srv/client/versions
+      - ./backups:/srv/backups
+      - ./rendered:/rendered
+      - ./tls:/tls
+    expose:
+      - "3000"
+    mem_limit: 160m
+
+  relay:
+    build: ./relay
+    image: eagler-relay
+    restart: unless-stopped
+    environment:
+      RELAY_PORT: "8081"
+      RELAY_CONFIG: /data/relay-config.json
+    volumes:
+      - ./data/relay:/data
+    expose:
+      - "8081"
+    mem_limit: 150m
+
+  coturn:
+    image: coturn/coturn:latest
+    restart: unless-stopped
+    network_mode: host
+    volumes:
+      - ./rendered/coturn/turnserver.conf:/etc/coturn/turnserver.conf:ro
+      - ./tls/nginx:/etc/coturn-certs:ro
+    mem_limit: 80m

@@ -1,0 +1,14 @@
+.tabs { display: flex; gap: 0.4rem; flex-wrap: wrap; margin: 0 0 1rem; }
+.tabs button { background: #1f1f29; border: 1px solid #2e2e3d; font-weight: 400; }
+.tabs button.on { background: #4a67c8; border-color: transparent; }
+.hidden { display: none; }
+.grid { display: grid; grid-template-columns: repeat(auto-fill, minmax(280px, 1fr)); gap: 0.8rem; }
+.field { display: flex; flex-direction: column; gap: 0.3rem; font-size: 0.85rem; color: #9a9aac; }
+.field input, .field select { width: 100%; }
+.field.wide { grid-column: 1 / -1; }
+code { background: #26262f; padding: 0.1rem 0.35rem; border-radius: 5px; font-size: 0.85em; }
+.tag { display: inline-block; padding: 0 0.45rem; border-radius: 6px; font-size: 0.8rem; }
+.tag.critical { background: #4a1f27; color: #f2a2ae; }
+.tag.warning { background: #46371c; color: #ecd39c; }
+.tag.info { background: #1c3346; color: #9cc4ec; }
+.bad { color: #f2a2ae; cursor: pointer; }

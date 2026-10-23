@@ -1,0 +1,9 @@
+{
+  "name": "eagler-backend",
+  "private": true,
+  "type": "module",
+  "engines": { "node": ">=26" },
+  "dependencies": {
+    "bcryptjs": "^3.0.2"
+  }
+}

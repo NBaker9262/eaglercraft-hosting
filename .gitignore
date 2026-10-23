@@ -1,0 +1,7 @@
+.env
+data/
+backups/
+client/versions/
+rendered/
+tls/
+node_modules/

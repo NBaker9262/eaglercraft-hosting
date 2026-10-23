@@ -1,0 +1,89 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>Admin — Eaglercraft</title>
+<link rel="stylesheet" href="/login-assets/style.css">
+<link rel="stylesheet" href="/admin/assets/admin.css">
+</head>
+<body class="launch-body">
+<main class="launch">
+  <header>
+    <h1>Server admin</h1>
+    <span class="spacer"></span>
+    <span id="statusline" class="dim"></span>
+    <button id="logout" class="ghost">Sign out</button>
+  </header>
+
+  <nav class="tabs" id="tabs">
+    <button data-tab="dashboard" class="on">Dashboard</button>
+    <button data-tab="users">Users</button>
+    <button data-tab="backups">Backups</button>
+    <button data-tab="versions">Versions</button>
+    <button data-tab="settings">Settings</button>
+    <button data-tab="audit">Audit log</button>
+  </nav>
+
+  <section id="tab-dashboard" class="card tab">
+    <h2>Health &amp; alerts</h2>
+    <div id="status"></div>
+    <table class="bk"><thead><tr><th>When</th><th>Level</th><th>Message</th><th></th></tr></thead>
+      <tbody id="alerts"></tbody></table>
+    <div class="row"><button id="resolve-all" class="ghost">Mark all alerts resolved</button></div>
+    <h2>Maintenance</h2>
+    <p class="dim">If you changed TURN or relay settings, apply them by running
+    <code>./eaglerctl restart relay coturn</code> on the VM. Back up the accounts database:
+    <code>./eaglerctl backup-db</code>.</p>
+    <button id="integrity" class="ghost">Run backup integrity check</button>
+    <span id="integrity-result" class="dim"></span>
+  </section>
+
+  <section id="tab-users" class="card tab hidden">
+    <h2>Users</h2>
+    <table class="bk"><thead><tr><th>User</th><th>Role</th><th>Quota</th><th>Last login</th><th>Actions</th></tr></thead>
+      <tbody id="users"></tbody></table>
+    <h2>Create account</h2>
+    <div class="row">
+      <input id="nu-name" placeholder="username">
+      <input id="nu-pass" placeholder="password (min 10 chars)">
+      <select id="nu-role"><option value="player">player</option><option value="admin">admin</option></select>
+      <button id="nu-create">Create</button>
+    </div>
+  </section>
+
+  <section id="tab-backups" class="card tab hidden">
+    <h2>All backups</h2>
+    <table class="bk"><thead><tr><th>Owner</th><th>Version</th><th>World</th><th>Rev</th><th>Size</th><th>Date</th><th>Vis</th><th></th></tr></thead>
+      <tbody id="allbackups"></tbody></table>
+  </section>
+
+  <section id="tab-versions" class="card tab hidden">
+    <h2>Client versions</h2>
+    <p class="dim">Upload the client's files as a <strong>zip</strong> that contains <code>index.html</code>,
+    <code>classes.js</code>, <code>assets.epk</code> and <code>lang/</code> at its root. Get builds only from
+    sources you trust — check the signature badge in-game after installing.</p>
+    <div class="row">
+      <input id="nv-name" placeholder="version name, e.g. 1.8">
+      <input type="file" id="nv-file" accept=".zip">
+      <button id="nv-upload">Upload</button>
+    </div>
+    <table class="bk"><thead><tr><th>Name</th><th>Enabled</th><th>Default</th><th>Files</th><th></th></tr></thead>
+      <tbody id="versions"></tbody></table>
+  </section>
+
+  <section id="tab-settings" class="card tab hidden">
+    <h2>Site &amp; client options</h2>
+    <div class="grid" id="settings"></div>
+    <div class="row"><button id="save-settings">Save settings</button><span id="settings-note" class="dim"></span></div>
+  </section>
+
+  <section id="tab-audit" class="card tab hidden">
+    <h2>Audit log</h2>
+    <table class="bk"><thead><tr><th>When</th><th>User</th><th>Action</th><th>Detail</th><th>IP</th></tr></thead>
+      <tbody id="audit"></tbody></table>
+  </section>
+</main>
+<script src="/admin/assets/admin.js"></script>
+</body>
+</html>

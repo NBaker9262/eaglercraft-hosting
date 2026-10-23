@@ -1,0 +1,124 @@
+# Rendered by start.sh: __PUBLIC_IP__ is replaced with the VM's public IP.
+# tls.conf is empty until a certificate exists, then contains the listen and
+# ssl_certificate directives.
+
+limit_req_zone $binary_remote_addr zone=login:10m rate=5r/m;
+
+server {
+    listen 80 default_server;
+    server_name __PUBLIC_IP__;
+
+    # ACME HTTP-01 challenges (Let's Encrypt IP certificates)
+    location /.well-known/acme-challenge/ {
+        root /var/www/acme;
+    }
+
+    # For the container healthcheck (everything else redirects to HTTPS)
+    location = /nginx-health {
+        return 200;
+    }
+
+    location / {
+        return 301 https://__PUBLIC_IP__$request_uri;
+    }
+}
+
+server {
+    # listen directives come from tls.conf (ssl or plain until a cert exists)
+    include /etc/nginx/tls.conf;
+    server_name __PUBLIC_IP__;
+
+    include /etc/nginx/security.conf;
+
+    # --- Public: login page and its assets -------------------------------
+    location = /login {
+        proxy_pass http://backend:3000/login;
+    }
+    location /login-assets/ {
+        proxy_pass http://backend:3000/login-assets/;
+    }
+    location = /api/login {
+        limit_req zone=login burst=5 nodelay;
+        proxy_pass http://backend:3000/api/login;
+    }
+    location = /api/login-form {
+        limit_req zone=login burst=5 nodelay;
+        proxy_pass http://backend:3000/api/login-form;
+    }
+
+    # --- Auth subrequests -------------------------------------------------
+    # 200 when the session cookie is valid, 401 otherwise.
+    location = /_auth {
+        internal;
+        proxy_pass http://backend:3000/api/auth/check;
+        proxy_pass_request_body off;
+        proxy_set_header Content-Length "";
+        proxy_set_header X-Original-URI $request_uri;
+    }
+    # Same, but additionally requires the admin role.
+    location = /_auth_admin {
+        internal;
+        proxy_pass http://backend:3000/api/auth/check?role=admin;
+        proxy_pass_request_body off;
+        proxy_set_header Content-Length "";
+        proxy_set_header X-Original-URI $request_uri;
+    }
+
+    # --- Launcher page (version picker + backup panel) --------------------
+    location = / {
+        auth_request /_auth;
+        error_page 401 = @to_login;
+        proxy_pass http://backend:3000/;
+    }
+
+    # --- Game client ------------------------------------------------------
+    # index.html is generated per user (eaglercraftXOpts, worldsDB, relays);
+    # everything else is static from the selected version folder.
+    location ~ ^/play/(?<playver>[^/]+)/index\.html$ {
+        auth_request /_auth;
+        error_page 401 = @to_login;
+        proxy_pass http://backend:3000/play/$playver/index.html;
+    }
+    location /play/ {
+        auth_request /_auth;
+        error_page 401 = @to_login;
+        alias /var/www/eagler/versions/;
+        gzip on;
+        gzip_types application/javascript text/css application/octet-stream application/wasm;
+        gzip_min_length 1024;
+    }
+
+    location @to_login {
+        return 302 /login;
+    }
+
+    # --- API (backups, admin): backend does its own role checks -----------
+    location /api/ {
+        auth_request /_auth;
+        error_page 401 = @to_login;
+        client_max_body_size 2g;
+        proxy_request_buffering off;
+        proxy_pass http://backend:3000;
+    }
+
+    # --- Admin UI: stricter session policy, checked server-side -----------
+    location /admin {
+        auth_request /_auth_admin;
+        error_page 401 = @to_login;
+        proxy_pass http://backend:3000/admin;
+    }
+
+    # --- Shared world relay (WebSocket), logged-in users only -------------
+    location /relay/ {
+        auth_request /_auth;
+        error_page 401 = @to_login;
+        proxy_pass http://relay:8081/;
+        proxy_http_version 1.1;
+        proxy_set_header Upgrade $http_upgrade;
+        proxy_set_header Connection "upgrade";
+        proxy_set_header Host $host;
+        proxy_set_header X-Forwarded-For $proxy_add_x_forwarded_for;
+        proxy_read_timeout 3600s;
+        proxy_send_timeout 3600s;
+    }
+}

@@ -1,0 +1,52 @@
+#!/usr/bin/env bash
+# eaglerctl — day-2 helpers for the eagler stack. Run on the VM: ./eaglerctl <cmd>
+set -euo pipefail
+cd "$(dirname "$0")"
+
+cmd="${1:-status}"
+svc="${2:-}"
+
+case "$cmd" in
+  status)
+    docker compose ps
+    echo
+    docker compose logs --no-log-prefix --tail 5 backend relay 2>/dev/null | tail -20
+    ;;
+  logs)
+    [ -n "$svc" ] || { echo "usage: eaglerctl logs <nginx|backend|relay|coturn>"; exit 1; }
+    docker compose logs -f --tail 100 "$svc"
+    ;;
+  restart)
+    [ -n "$svc" ] || { echo "usage: eaglerctl restart <nginx|backend|relay|coturn|all>"; exit 1; }
+    if [ "$svc" = all ]; then docker compose restart; else docker compose restart "$svc"; fi
+    echo "$svc restarted"
+    ;;
+  reload-nginx)
+    docker compose exec nginx nginx -t && docker compose exec nginx nginx -s reload
+    echo "nginx reloaded"
+    ;;
+  backup-db)
+    docker compose exec -T backend node -e "
+      const { DatabaseSync } = require('node:sqlite');
+      const db = new DatabaseSync('/data/eagler.db');
+      db.exec(\"VACUUM INTO '/data/eagler-backup.db'\");
+      console.log('wrote /data/eagler-backup.db');
+    "
+    echo "Copy ./data/eagler-backup.db somewhere safe."
+    ;;
+  admin-password)
+    docker compose exec -T backend node -e "
+      const { DatabaseSync } = require('node:sqlite');
+      const bcrypt = require('/app/node_modules/bcryptjs');
+      const db = new DatabaseSync('/data/eagler.db');
+      const pw = process.argv[1];
+      if (!pw || pw.length < 10) { console.error('password must be at least 10 characters'); process.exit(1); }
+      db.prepare(\"UPDATE users SET pw_hash = ? WHERE username = 'admin'\").run(bcrypt.hashSync(pw, 12));
+      db.prepare(\"DELETE FROM sessions WHERE user_id = (SELECT id FROM users WHERE username = 'admin')\").run();
+      console.log('admin password updated, sessions signed out');
+    " "${2:-}"
+    ;;
+  *)
+    echo "usage: eaglerctl <status|logs|restart|reload-nginx|backup-db|admin-password>"
+    ;;
+esac
