@@ -30,85 +30,64 @@ ssh-keygen -t ed25519 -f ~/.ssh/id_ed25519 -N ""
 cat ~/.ssh/id_ed25519.pub   # paste this into the instance's SSH keys
 ```
 
-## 1. Networking: public IP, VCN, and firewall rules — all from Cloud Shell
+## 1. Networking: VCN, subnet, firewall rules, public IP — all from Cloud Shell
 
-These are plain `oci` CLI commands. Cloud Shell's CLI is already
-authenticated to your tenancy — run `oci whoami` to confirm; no keys, no
-`oci login`. References:
+These are plain `oci` CLI commands, and they **create everything**: the VCN,
+internet gateway, route table, security list, subnet, and the public IP
+attachment. No Console clicking. Cloud Shell's CLI is already authenticated
+to your tenancy — run `oci whoami` to confirm; no keys, no `oci login`.
+References:
 [CLI command reference](https://docs.oracle.com/en-us/iaas/tools/oci-cli/latest/oci_cli_docs/),
 [assigning a reserved public IP](https://docs.oracle.com/en-us/iaas/Content/Network/Tasks/reserved-public-ip-assign.htm),
 [updating security list rules](https://docs.oracle.com/en-us/iaas/Content/Network/Concepts/update-securitylist.htm).
 
-Set the compartment to work in first (copy its OCID from the output of
-`oci iam compartment list`, or use the tenancy OCID from `oci whoami` to
-work in the root compartment):
+Set three variables first. The compartment OCID comes from the output of
+`oci iam compartment list` (or use the tenancy OCID from `oci whoami` to
+work in the root compartment); the instance is your eagler VM:
 
 ```bash
 C=ocid1.compartment.oc1..PASTE_YOUR_COMPARTMENT_OCID
+I=ocid1.instance.oc1.phx.anyhqljtfeaf2sqci4e7fvrmacxbvi7nsr3oh2zunm4x3eysy5jqb2niyv2a   # the eagler VM
+PUB=129.146.247.75
 ```
 
-### 1a. Find the VM, its VNIC, and its VCN
+### 1a. Create the VCN, internet gateway, security list, and subnet
 
 ```bash
-# Pick your eagler VM's OCID from this table
-oci compute instance list --compartment-id "$C" \
-  | jq -r '.data[] | select(."lifecycle-state"!="TERMINATED")
-           | [."display-name", .id] | @tsv'
-I=ocid1.instance.oc1..PASTE_INSTANCE_OCID
+# 1. The VCN (10.0.0.0/16)
+VCN=$(oci network vcn create --compartment-id "$C" --display-name eagler-vcn \
+  --cidr-blocks '["10.0.0.0/16"]' | jq -r '.data.id')
 
-# Primary VNIC and its primary private IP
-VNIC=$(oci compute vnic-attachment list --compartment-id "$C" --instance-id "$I" \
-  | jq -r '.data[0]."vnic-id"')
-PRIVIP=$(oci network private-ip list --vnic-id "$VNIC" \
-  | jq -r '.data[] | select(."is-primary") | .id')
+# 2. Internet gateway + default route, so the subnet can reach the internet
+IGW=$(oci network internet-gateway create --compartment-id "$C" \
+  --vcn-id "$VCN" --display-name eagler-igw --is-enabled true | jq -r '.data.id')
+RT=$(oci network vcn get --vcn-id "$VCN" | jq -r '.data."default-route-table-id"')
+oci network route-table update --rt-id "$RT" \
+  --route-rules "[{\"destination\":\"0.0.0.0/0\",\"network-entity-id\":\"$IGW\"}]" >/dev/null
 
-# Subnet + VCN + security list the VM uses (first subnet in the compartment;
-# if you have several, pick the row whose vcn-id matches the VM)
-oci network subnet list --compartment-id "$C" \
-  | jq -r '.data[] | [."display-name", .id, ."vcn-id"] | @tsv'
-SUBNET=ocid1.subnet.oc1..PASTE_SUBNET_OCID
-VCN=$(oci network subnet get --subnet-id "$SUBNET" | jq -r '.data."vcn-id"')
-SL=$(oci network subnet get --subnet-id "$SUBNET" \
-  | jq -r '.data."security-list-ids"[0]')
+# 3. Security list with every rule baked in (SSH + the game's ports)
+SL=$(oci network security-list create --compartment-id "$C" --vcn-id "$VCN" \
+  --display-name eagler-security-list \
+  --ingress-security-rules '[
+    {"protocol":"tcp","source":"0.0.0.0/0","tcpOptions":{"destinationPortRange":{"min":22,"max":22}}},
+    {"protocol":"tcp","source":"0.0.0.0/0","tcpOptions":{"destinationPortRange":{"min":80,"max":80}}},
+    {"protocol":"tcp","source":"0.0.0.0/0","tcpOptions":{"destinationPortRange":{"min":443,"max":443}}},
+    {"protocol":"tcp","source":"0.0.0.0/0","tcpOptions":{"destinationPortRange":{"min":3478,"max":3478}}},
+    {"protocol":"udp","source":"0.0.0.0/0","udpOptions":{"destinationPortRange":{"min":3478,"max":3478}}},
+    {"protocol":"tcp","source":"0.0.0.0/0","tcpOptions":{"destinationPortRange":{"min":5349,"max":5349}}},
+    {"protocol":"udp","source":"0.0.0.0/0","udpOptions":{"destinationPortRange":{"min":49160,"max":49200}}}
+  ]' \
+  --egress-security-rules '[{"protocol":"all","destination":"0.0.0.0/0"}]' \
+  | jq -r '.data.id')
+
+# 4. The subnet, attached to that security list
+SUBNET=$(oci network subnet create --compartment-id "$C" --vcn-id "$VCN" \
+  --display-name eagler-subnet --cidr-block 10.0.0.0/24 \
+  --security-list-ids "[\"$SL\"]" | jq -r '.data.id')
 ```
 
-### 1b. Assign the reserved public IP `129.146.247.75`
-
-The IP `129.146.247.75` is already reserved. Confirm it and check whether
-it is attached:
-
-```bash
-oci network public-ip list --compartment-id "$C" \
-  | jq -r '.data[] | select(."ip-address"=="129.146.247.75")
-           | [.id, ."lifecycle-state", (."private-ip-id" // "unassigned")] | @tsv'
-PIP=ocid1.publicip.oc1..PASTE_PUBLICIP_OCID
-```
-
-Attach it to the VM's primary private IP — this is the step that makes
-`129.146.247.75` the VM's address:
-
-```bash
-oci network public-ip update --public-ip-id "$PIP" --private-ip-id "$PRIVIP" \
-  --wait-for-state ASSIGNED
-```
-
-If this fails because the VM still holds an **ephemeral** public IP, delete
-that one first (a private IP can only have one public IP), then re-run the
-`update` above:
-
-```bash
-EPH=$(oci network public-ip list --compartment-id "$C" \
-  | jq -r --arg p "$PRIVIP" '.data[]
-      | select(."private-ip-id"==$p and ."lifetime"=="EPHEMERAL") | .id')
-[ -n "$EPH" ] && oci network public-ip delete --public-ip-id "$EPH" --force
-```
-
-(If you ever need to reserve another IP: `oci network public-ip create
---compartment-id "$C" --lifetime RESERVED --display-name eagler-ip`.)
-
-### 1c. Open the ports in the security list
-
-Source `0.0.0.0/0` unless you know the players' IP ranges:
+The rules these commands install (source `0.0.0.0/0` unless you know the
+players' IP ranges):
 
 | Protocol | Port        | Purpose                    |
 |----------|-------------|----------------------------|
@@ -119,12 +98,23 @@ Source `0.0.0.0/0` unless you know the players' IP ranges:
 | TCP      | 5349        | TURN over TLS              |
 | UDP      | 49160–49200 | TURN relay range           |
 
-`oci network security-list update` **replaces the entire existing rule set**,
-so fetch the current rules and send old + new together (Cloud Shell has
-`jq` preinstalled):
+A running instance cannot move into a new subnet, and your VM already exists
+— so either relaunch it into `eagler-subnet` (Console → Create instance →
+Networking → VCN `eagler-vcn`, subnet `eagler-subnet`), or keep the VM where
+it is and open the same ports on the security list it already uses (next
+step).
+
+### 1b. The VM already runs — open its ports on the security list it uses
 
 ```bash
-# Rules to add
+# The security list the VM's subnet actually uses
+VNIC=$(oci compute vnic-attachment list --compartment-id "$C" --instance-id "$I" \
+  | jq -r '.data[0]."vnic-id"')
+SUBNET=$(oci network vnic get --id "$VNIC" | jq -r '.data."subnet-id"')
+SL=$(oci network subnet get --subnet-id "$SUBNET" \
+  | jq -r '.data."security-list-ids"[0]')
+
+# Game ports to add
 cat > /tmp/eagler-ingress.json <<'EOF'
 [
   {"protocol":"tcp","source":"0.0.0.0/0","tcpOptions":{"destinationPortRange":{"min":80,"max":80}}},
@@ -136,7 +126,7 @@ cat > /tmp/eagler-ingress.json <<'EOF'
 ]
 EOF
 
-# Existing rules + the new ones, as one full replacement
+# security-list update REPLACES the entire rule set, so send old + new together
 oci network security-list update --security-list-id "$SL" \
   --ingress-security-rules "$(oci network security-list get --security-list-id "$SL" \
       | jq -c --slurpfile new /tmp/eagler-ingress.json \
@@ -147,29 +137,38 @@ oci network security-list get --security-list-id "$SL" \
   | jq -r '.data."ingress-security-rules"[] | [.protocol, .source, (.tcpOptions.destinationPortRange.min // .udpOptions.destinationPortRange.min // "")] | @tsv'
 ```
 
-### 1d. Only if you need a brand-new VCN and subnet
-
-The Console's "VCN with Internet Connectivity" wizard, or these commands:
+### 1c. Assign the reserved public IP `129.146.247.75`
 
 ```bash
-VCN=$(oci network vcn create --compartment-id "$C" --display-name eagler-vcn \
-  --cidr-blocks '["10.0.0.0/16"]' | jq -r '.data.id')
+# The VM's primary private IP (assignment target)
+PRIVIP=$(oci network private-ip list --vnic-id "$VNIC" \
+  | jq -r '.data[] | select(."is-primary") | .id')
 
-# Internet gateway + default route, so the subnet can reach the internet
-IGW=$(oci network internet-gateway create --compartment-id "$C" \
-  --vcn-id "$VCN" --display-name eagler-igw --is-enabled true | jq -r '.data.id')
-RT=$(oci network vcn get --vcn-id "$VCN" | jq -r '.data."default-route-table-id"')
-oci network route-table update --rt-id "$RT" \
-  --route-rules "[{\"destination\":\"0.0.0.0/0\",\"network-entity-id\":\"$IGW\"}]"
+# The reserved IP's OCID
+PIP=$(oci network public-ip list --compartment-id "$C" \
+  | jq -r --arg ip "$PUB" '.data[] | select(."ip-address"==$ip) | .id')
+echo "PIP=$PIP"   # must print an ocid — if empty, the IP is not in this compartment
 
-SUBNET=$(oci network subnet create --compartment-id "$C" --vcn-id "$VCN" \
-  --display-name eagler-subnet --cidr-block 10.0.0.0/24 | jq -r '.data.id')
-SL=$(oci network subnet get --subnet-id "$SUBNET" \
-  | jq -r '.data."security-list-ids"[0]')
-# then apply the security-list update from 1c to this SL
+# Attach it — this makes 129.146.247.75 the VM's address
+oci network public-ip update --public-ip-id "$PIP" --private-ip-id "$PRIVIP" \
+  --wait-for-state ASSIGNED
 ```
 
-### 1e. Ubuntu iptables (second firewall layer — cannot be done via `oci` CLI)
+If the `update` fails because the VM still holds an **ephemeral** public IP,
+delete that one first (a private IP can only have one public IP), then
+re-run the `update`:
+
+```bash
+EPH=$(oci network public-ip list --compartment-id "$C" \
+  | jq -r --arg p "$PRIVIP" '.data[]
+      | select(."private-ip-id"==$p and ."lifetime"=="EPHEMERAL") | .id')
+[ -n "$EPH" ] && oci network public-ip delete --public-ip-id "$EPH" --force
+```
+
+(If you ever need to reserve another IP: `oci network public-ip create
+--compartment-id "$C" --lifetime RESERVED --display-name eagler-ip`.)
+
+### 1d. Ubuntu iptables (second firewall layer — cannot be done via `oci` CLI)
 
 Oracle Ubuntu images ship restrictive host rules the security list does not
 override. Still in the SSH session on the VM, insert ACCEPT rules **before**
