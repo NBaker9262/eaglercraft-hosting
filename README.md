@@ -5,7 +5,7 @@ VM (built for Oracle Always Free 1 GB Micro): login-gated game clients,
 shared-world relay, TURN server, per-world server backups, and a full admin
 page. Nothing to build by hand — one command brings the whole stack up.
 
-```
+```text
 Player browser (the game runs there; the VM never renders anything)
    |  HTTPS
    v
@@ -18,11 +18,20 @@ nginx :443 ── auth_request ──> backend (accounts, sessions, backups, adm
 coturn :3478/:5349   TURN for blocked networks
 ```
 
-## Deploy: one command
+## Deploy: one command, from Oracle Cloud Shell
 
-On the VM (Ubuntu):
+No local tools needed — the whole deploy runs in Oracle's browser terminal
+(full walkthrough in **[docs/vm-setup.md](docs/vm-setup.md)**):
+
+1. In the [OCI Console](https://cloud.oracle.com/), open **Cloud Shell**
+   (terminal icon in the header) and enable its **public network** option
+   (Cloud Shell menu → Network settings).
+2. SSH to the VM and run the one command:
 
 ```bash
+ssh ubuntu@YOUR.PUBLIC.IP.HERE
+git clone https://github.com/NBaker9262/eaglercraft-hosting.git
+cd eaglercraft-hosting
 sudo ./start.sh
 ```
 
@@ -79,9 +88,9 @@ audit log · backup integrity check.
 
 ## VM preparation (Oracle Cloud)
 
-See **docs/vm-setup.md**: security-list ports, the second iptables layer,
-zram/swap, memory caps, and the Let's Encrypt IP-address certificate
-(6-day lifetime, automated renewal) with the certbot renewal hook.
+See **[docs/vm-setup.md](docs/vm-setup.md)**: opening Cloud Shell, the
+security-list ports, the second iptables layer, zram/swap, memory caps, and
+the Let's Encrypt IP-address certificate (6-day lifetime, automated renewal).
 
 ## Security model
 

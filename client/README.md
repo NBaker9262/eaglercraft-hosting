@@ -2,7 +2,7 @@
 
 Each subfolder is one self-contained client version:
 
-```
+```text
 client/versions/1.8/index.html, classes.js, assets.epk, lang/...
 ```
 
