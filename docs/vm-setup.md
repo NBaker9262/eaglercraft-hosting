@@ -19,7 +19,7 @@ Reference: [Oracle Cloud Shell documentation](https://docs.oracle.com/en-us/iaas
 4. SSH to the VM (this is where every later step runs):
 
 ```bash
-ssh ubuntu@YOUR.PUBLIC.IP.HERE
+ssh ubuntu@129.146.247.75
 ```
 
 If you don't have a key yet, generate one in Cloud Shell and add it to the
@@ -30,25 +30,150 @@ ssh-keygen -t ed25519 -f ~/.ssh/id_ed25519 -N ""
 cat ~/.ssh/id_ed25519.pub   # paste this into the instance's SSH keys
 ```
 
-## 1. Reserve the public IP and open the firewalls
+## 1. Networking: public IP, VCN, and firewall rules — all from Cloud Shell
 
-1. **Reserve a static IP** — Networking → Reserved public IPs, attach it to
-   the instance. This is `YOUR.PUBLIC.IP.HERE` everywhere below.
-2. **Security list / NSG ingress rules** (Console → Networking), source
-   `0.0.0.0/0` unless you know the players' ranges:
+These are plain `oci` CLI commands. Cloud Shell's CLI is already
+authenticated to your tenancy — run `oci whoami` to confirm; no keys, no
+`oci login`. References:
+[CLI command reference](https://docs.oracle.com/en-us/iaas/tools/oci-cli/latest/oci_cli_docs/),
+[assigning a reserved public IP](https://docs.oracle.com/en-us/iaas/Content/Network/Tasks/reserved-public-ip-assign.htm),
+[updating security list rules](https://docs.oracle.com/en-us/iaas/Content/Network/Concepts/update-securitylist.htm).
 
-   | Protocol | Port        | Purpose                    |
-   |----------|-------------|----------------------------|
-   | TCP      | 22          | SSH (restrict to your IP)  |
-   | TCP      | 80          | ACME validation + redirect |
-   | TCP      | 443         | HTTPS site + relay         |
-   | TCP+UDP  | 3478        | TURN                       |
-   | TCP      | 5349        | TURN over TLS              |
-   | UDP      | 49160–49200 | TURN relay range           |
+Set the compartment to work in first (copy its OCID from the output of
+`oci iam compartment list`, or use the tenancy OCID from `oci whoami` to
+work in the root compartment):
 
-3. **Ubuntu iptables** (the second firewall layer — Oracle Ubuntu images ship
-   restrictive rules the security list does not override). Still in the SSH
-   session on the VM, insert ACCEPT rules **before** any REJECT rule:
+```bash
+C=ocid1.compartment.oc1..PASTE_YOUR_COMPARTMENT_OCID
+```
+
+### 1a. Find the VM, its VNIC, and its VCN
+
+```bash
+# Pick your eagler VM's OCID from this table
+oci compute instance list --compartment-id "$C" \
+  | jq -r '.data[] | select(."lifecycle-state"!="TERMINATED")
+           | [."display-name", .id] | @tsv'
+I=ocid1.instance.oc1..PASTE_INSTANCE_OCID
+
+# Primary VNIC and its primary private IP
+VNIC=$(oci compute vnic-attachment list --compartment-id "$C" --instance-id "$I" \
+  | jq -r '.data[0]."vnic-id"')
+PRIVIP=$(oci network private-ip list --vnic-id "$VNIC" \
+  | jq -r '.data[] | select(."is-primary") | .id')
+
+# Subnet + VCN + security list the VM uses (first subnet in the compartment;
+# if you have several, pick the row whose vcn-id matches the VM)
+oci network subnet list --compartment-id "$C" \
+  | jq -r '.data[] | [."display-name", .id, ."vcn-id"] | @tsv'
+SUBNET=ocid1.subnet.oc1..PASTE_SUBNET_OCID
+VCN=$(oci network subnet get --subnet-id "$SUBNET" | jq -r '.data."vcn-id"')
+SL=$(oci network subnet get --subnet-id "$SUBNET" \
+  | jq -r '.data."security-list-ids"[0]')
+```
+
+### 1b. Assign the reserved public IP `129.146.247.75`
+
+The IP `129.146.247.75` is already reserved. Confirm it and check whether
+it is attached:
+
+```bash
+oci network public-ip list --compartment-id "$C" \
+  | jq -r '.data[] | select(."ip-address"=="129.146.247.75")
+           | [.id, ."lifecycle-state", (."private-ip-id" // "unassigned")] | @tsv'
+PIP=ocid1.publicip.oc1..PASTE_PUBLICIP_OCID
+```
+
+Attach it to the VM's primary private IP — this is the step that makes
+`129.146.247.75` the VM's address:
+
+```bash
+oci network public-ip update --public-ip-id "$PIP" --private-ip-id "$PRIVIP" \
+  --wait-for-state ASSIGNED
+```
+
+If this fails because the VM still holds an **ephemeral** public IP, delete
+that one first (a private IP can only have one public IP), then re-run the
+`update` above:
+
+```bash
+EPH=$(oci network public-ip list --compartment-id "$C" \
+  | jq -r --arg p "$PRIVIP" '.data[]
+      | select(."private-ip-id"==$p and ."lifetime"=="EPHEMERAL") | .id')
+[ -n "$EPH" ] && oci network public-ip delete --public-ip-id "$EPH" --force
+```
+
+(If you ever need to reserve another IP: `oci network public-ip create
+--compartment-id "$C" --lifetime RESERVED --display-name eagler-ip`.)
+
+### 1c. Open the ports in the security list
+
+Source `0.0.0.0/0` unless you know the players' IP ranges:
+
+| Protocol | Port        | Purpose                    |
+|----------|-------------|----------------------------|
+| TCP      | 22          | SSH (restrict to your IP)  |
+| TCP      | 80          | ACME validation + redirect |
+| TCP      | 443         | HTTPS site + relay         |
+| TCP+UDP  | 3478        | TURN                       |
+| TCP      | 5349        | TURN over TLS              |
+| UDP      | 49160–49200 | TURN relay range           |
+
+`oci network security-list update` **replaces the entire existing rule set**,
+so fetch the current rules and send old + new together (Cloud Shell has
+`jq` preinstalled):
+
+```bash
+# Rules to add
+cat > /tmp/eagler-ingress.json <<'EOF'
+[
+  {"protocol":"tcp","source":"0.0.0.0/0","tcpOptions":{"destinationPortRange":{"min":80,"max":80}}},
+  {"protocol":"tcp","source":"0.0.0.0/0","tcpOptions":{"destinationPortRange":{"min":443,"max":443}}},
+  {"protocol":"tcp","source":"0.0.0.0/0","tcpOptions":{"destinationPortRange":{"min":3478,"max":3478}}},
+  {"protocol":"udp","source":"0.0.0.0/0","udpOptions":{"destinationPortRange":{"min":3478,"max":3478}}},
+  {"protocol":"tcp","source":"0.0.0.0/0","tcpOptions":{"destinationPortRange":{"min":5349,"max":5349}}},
+  {"protocol":"udp","source":"0.0.0.0/0","udpOptions":{"destinationPortRange":{"min":49160,"max":49200}}}
+]
+EOF
+
+# Existing rules + the new ones, as one full replacement
+oci network security-list update --security-list-id "$SL" \
+  --ingress-security-rules "$(oci network security-list get --security-list-id "$SL" \
+      | jq -c --slurpfile new /tmp/eagler-ingress.json \
+      '.data."ingress-security-rules" + $new[0]')"
+
+# Verify: every port above should appear in the output
+oci network security-list get --security-list-id "$SL" \
+  | jq -r '.data."ingress-security-rules"[] | [.protocol, .source, (.tcpOptions.destinationPortRange.min // .udpOptions.destinationPortRange.min // "")] | @tsv'
+```
+
+### 1d. Only if you need a brand-new VCN and subnet
+
+The Console's "VCN with Internet Connectivity" wizard, or these commands:
+
+```bash
+VCN=$(oci network vcn create --compartment-id "$C" --display-name eagler-vcn \
+  --cidr-blocks '["10.0.0.0/16"]' | jq -r '.data.id')
+
+# Internet gateway + default route, so the subnet can reach the internet
+IGW=$(oci network internet-gateway create --compartment-id "$C" \
+  --vcn-id "$VCN" --display-name eagler-igw --is-enabled true | jq -r '.data.id')
+RT=$(oci network vcn get --vcn-id "$VCN" | jq -r '.data."default-route-table-id"')
+oci network route-table update --rt-id "$RT" \
+  --route-rules "[{\"destination\":\"0.0.0.0/0\",\"network-entity-id\":\"$IGW\"}]"
+
+SUBNET=$(oci network subnet create --compartment-id "$C" --vcn-id "$VCN" \
+  --display-name eagler-subnet --cidr-block 10.0.0.0/24 | jq -r '.data.id')
+SL=$(oci network subnet get --subnet-id "$SUBNET" \
+  | jq -r '.data."security-list-ids"[0]')
+# then apply the security-list update from 1c to this SL
+```
+
+### 1e. Ubuntu iptables (second firewall layer — cannot be done via `oci` CLI)
+
+Oracle Ubuntu images ship restrictive host rules the security list does not
+override. Still in the SSH session on the VM, insert ACCEPT rules **before**
+any REJECT rule:
 
 ```bash
 sudo iptables -L INPUT -n --line-numbers   # check positions first
@@ -124,13 +249,13 @@ sudo apt install -y certbot
 sudo docker compose stop nginx
 sudo certbot certonly --standalone \
   --preferred-profile shortlived \
-  --ip-address YOUR.PUBLIC.IP.HERE
+  --ip-address 129.146.247.75
 sudo docker compose start nginx
 
 # Copy into the stack and enable TLS
 sudo mkdir -p tls/nginx
-sudo cp /etc/letsencrypt/live/YOUR.PUBLIC.IP.HERE/fullchain.pem tls/nginx/
-sudo cp /etc/letsencrypt/live/YOUR.PUBLIC.IP.HERE/privkey.pem  tls/nginx/
+sudo cp /etc/letsencrypt/live/129.146.247.75/fullchain.pem tls/nginx/
+sudo cp /etc/letsencrypt/live/129.146.247.75/privkey.pem  tls/nginx/
 sudo ./start.sh          # re-renders: nginx now serves HTTPS
 ```
 

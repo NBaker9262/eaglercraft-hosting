@@ -29,7 +29,7 @@ No local tools needed — the whole deploy runs in Oracle's browser terminal
 2. SSH to the VM and run the one command:
 
 ```bash
-ssh ubuntu@YOUR.PUBLIC.IP.HERE
+ssh ubuntu@129.146.247.75
 git clone https://github.com/NBaker9262/eaglercraft-hosting.git
 cd eaglercraft-hosting
 sudo ./start.sh
